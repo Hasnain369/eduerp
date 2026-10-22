@@ -1,0 +1,213 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isTeacher(uid) {
+      return signedIn() && userDoc(uid).data.role == 'teacher';
+    }
+
+    function isApprovedTeacher(uid) {
+      return isTeacher(uid)
+        && userDoc(uid).data.approvalStatus in ['approved', 'active'];
+    }
+
+    function isTeacherAssignedToSchool(uid, schoolId) {
+      return isApprovedTeacher(uid)
+        && userDoc(uid).data.schoolId == schoolId;
+    }
+
+    function isStudent(uid) {
+      return signedIn() && userDoc(uid).data.role == 'student';
+    }
+
+    function isSchoolAdmin() {
+      return signedIn() && userDoc(request.auth.uid).data.role == 'admin';
+    }
+
+    function editableProfileFields() {
+      return [
+        'name',
+        'email',
+        'schoolId',
+        'designation',
+        'teacherId',
+        'subjects',
+        'classSections',
+        'profileCompleted',
+        'photoUrl',
+        'updatedAt'
+      ];
+    }
+
+    function isEditableProfileUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(editableProfileFields());
+    }
+
+    function isEditableTeacherReview() {
+      return resource.data.role == 'teacher'
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'approvalStatus',
+          'schoolId',
+          'subjects',
+          'classSections',
+          'profileCompleted',
+          'rejectionReason',
+          'updatedAt'
+        ]);
+    }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid) || isApprovedTeacher(uid) || isSchoolAdmin();
+      allow list: if isSchoolAdmin() || (
+        isApprovedTeacher(request.auth.uid)
+        && resource.data.role == 'student'
+        && resource.data.schoolId == userDoc(request.auth.uid).data.schoolId
+      );
+      allow create: if isOwner(uid)
+        && request.resource.data.role in ['teacher', 'student']
+        && request.resource.data.approvalStatus in ['pending', 'approved']
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.name is string
+        && request.resource.data.name.trim().size() > 0;
+      allow update: if (isOwner(uid)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.role in ['teacher', 'student', 'admin']
+        && request.resource.data.approvalStatus == resource.data.approvalStatus
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.name is string
+        && request.resource.data.name.trim().size() > 0
+        && isEditableProfileUpdate())
+        || (isSchoolAdmin() && isEditableTeacherReview());
+      allow delete: if false;
+
+      match /teacherClasses/{classId} {
+        allow read, create, update, delete: if isOwner(uid);
+
+        match /students/{studentId} {
+          allow read, create, update, delete: if isOwner(uid);
+        }
+
+        match /attendance/{dateKey} {
+          allow read, create, update, delete: if isOwner(uid);
+        }
+      }
+
+      match /plannerPeriods/{periodId} {
+        allow read, create, update, delete: if isOwner(uid);
+      }
+
+      match /plannerLectures/{lectureId} {
+        allow read, create, update, delete: if isOwner(uid);
+      }
+
+      match /plannerDays/{dateKey} {
+        allow read, create, update, delete: if isOwner(uid);
+      }
+    }
+
+    match /schools/{schoolId} {
+      allow read: if signedIn() && (
+        isSchoolAdmin() ||
+        isApprovedTeacher(request.auth.uid) ||
+        isStudent(request.auth.uid)
+      );
+      allow write: if isSchoolAdmin();
+
+      match /classes/{classId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isApprovedTeacher(request.auth.uid) ||
+          isStudent(request.auth.uid)
+        );
+        allow write: if isSchoolAdmin();
+      }
+
+      match /subjects/{subjectId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isApprovedTeacher(request.auth.uid) ||
+          isStudent(request.auth.uid)
+        );
+        allow write: if isSchoolAdmin();
+      }
+
+      match /timetables/{lectureId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isApprovedTeacher(request.auth.uid) ||
+          isStudent(request.auth.uid)
+        );
+        allow write: if isSchoolAdmin() || (isApprovedTeacher(request.auth.uid) && request.resource.data.teacherId == request.auth.uid);
+      }
+
+      match /attendance/{recordId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isTeacherAssignedToSchool(request.auth.uid, schoolId) ||
+          isStudent(request.auth.uid)
+        );
+        allow create, update: if isSchoolAdmin() || (
+          isTeacherAssignedToSchool(request.auth.uid, schoolId)
+          && request.resource.data.teacherId == request.auth.uid
+          && request.resource.data.schoolId == schoolId
+          && request.resource.data.classSection in userDoc(request.auth.uid).data.classSections
+        );
+        allow delete: if isSchoolAdmin();
+      }
+
+      match /assignments/{assignmentId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isTeacherAssignedToSchool(request.auth.uid, schoolId) ||
+          isStudent(request.auth.uid)
+        );
+        allow create: if isSchoolAdmin() || (
+          isTeacherAssignedToSchool(request.auth.uid, schoolId)
+          && request.resource.data.teacherId == request.auth.uid
+          && request.resource.data.schoolId == schoolId
+          && request.resource.data.date is timestamp
+          && request.resource.data.subject is string
+          && request.resource.data.subject.size() > 0
+          && request.resource.data.topic is string
+          && request.resource.data.topic.size() > 0
+        );
+        allow update: if isSchoolAdmin() || (
+          isTeacherAssignedToSchool(request.auth.uid, schoolId)
+          && request.resource.data.teacherId == request.auth.uid
+          && request.resource.data.schoolId == schoolId
+        );
+        allow delete: if isSchoolAdmin() || (
+          isTeacherAssignedToSchool(request.auth.uid, schoolId)
+          && resource.data.teacherId == request.auth.uid
+        );
+      }
+
+      match /results/{resultId} {
+        allow read: if signedIn() && (
+          isSchoolAdmin() ||
+          isApprovedTeacher(request.auth.uid) ||
+          isStudent(request.auth.uid)
+        );
+        allow create, update: if isSchoolAdmin() || (isApprovedTeacher(request.auth.uid) && request.resource.data.teacherId == request.auth.uid);
+        allow delete: if isSchoolAdmin() || (isApprovedTeacher(request.auth.uid) && resource.data.teacherId == request.auth.uid);
+      }
+
+      match /notices/{noticeId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isSchoolAdmin();
+      }
+    }
+  }
+}
